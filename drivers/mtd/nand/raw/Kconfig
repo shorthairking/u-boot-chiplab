@@ -258,6 +258,36 @@ config NAND_KIRKWOOD
 	depends on ARCH_KIRKWOOD
 	default y
 
+config NAND_CHIPLAB
+	bool "Chiplab (Loongson Artix-7 实验箱) APB NAND controller"
+	depends on TARGET_CHIPLAB_RV32
+	select SYS_NAND_SELF_INIT
+	select NAND_ECC_BCH
+	select BCH
+	help
+	  Support for the chiplab APB NAND controller (chiplab/IP/APB_DEV/NAND/
+	  nand.v, base 0x1FE78000) with the platform descriptor-driven DMA
+	  engine (chiplab/IP/DMA/dma.v, order register at 0x1FD01160).
+
+	  The controller has no hardware ECC engine, so the driver uses the
+	  U-Boot software BCH framework. The ECC layout constants shared with
+	  the future Linux driver live in
+	  drivers/mtd/nand/raw/chiplab_nand.h section 3.
+
+config NAND_CHIPLAB_ECC_STRENGTH
+	int "Chiplab NAND software BCH correction strength (bits / 512 B step)"
+	depends on NAND_CHIPLAB
+	range 1 4
+	default 4
+	help
+	  Number of correctable bits per 512 byte ECC step for the software
+	  BCH engine. The board default is 4 (BCH-4, the documented chip
+	  requirement is 1 bit / 512 B, so 4 gives headroom).
+
+	  This symbol is also the single knob used by the mutation test in
+	  board/loongson/chiplab/nand-unittest/run.sh: lowering it must make
+	  injection of more errors than the strength fail closed.
+
 config NAND_ECC_BCH
 	bool
 

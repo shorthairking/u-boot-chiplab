@@ -39,6 +39,15 @@ CONFIG_DEBUG_UART_SHIFT=0
 # 环境变量区 = NAND 头部 2 个 128 KiB 块（256 KiB），与分区表 256K(env) 一致
 CONFIG_MTD=y
 CONFIG_MTD_RAW_NAND=y
+# chiplab APB NAND 控制器驱动（drivers/mtd/nand/raw/chiplab_nand.c）
+# select 了 SYS_NAND_SELF_INIT（隐藏符号）与 NAND_ECC_BCH（软件 BCH）
+CONFIG_NAND_CHIPLAB=y
+# 软件 BCH 需要通用 BCH 库 lib/bch.c（由 NAND_CHIPLAB select BCH 拉入，
+# 这里显式列出以便审阅；写进 defconfig 会被 Kconfig 正常保留）
+CONFIG_BCH=y
+# 纠错能力：4 bit / 512 B（芯片要求 1 bit/512 B，取 4 留余量）；
+# 该符号同时是单元测试反证实验的唯一开关（调小后 >N bit 错必须 FAIL）
+CONFIG_NAND_CHIPLAB_ECC_STRENGTH=4
 CONFIG_CMD_MTD=y
 CONFIG_CMD_NAND=y
 CONFIG_CMD_MTDPARTS=y

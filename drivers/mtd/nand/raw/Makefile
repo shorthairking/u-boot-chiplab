@@ -48,6 +48,7 @@ ifdef NORMAL_DRIVERS
 
 obj-$(CONFIG_NAND_ECC_BCH) += nand_bch.o
 
+obj-$(CONFIG_NAND_CHIPLAB) += chiplab_nand.o
 obj-$(CONFIG_NAND_ATMEL) += atmel_nand.o
 obj-$(CONFIG_DM_NAND_ATMEL) += atmel/
 obj-$(CONFIG_NAND_ARASAN) += arasan_nfc.o

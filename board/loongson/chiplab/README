@@ -99,9 +99,147 @@ NAND / MTD 预留（本阶段只做编译期预留）
   而本阶段还没有控制器驱动，链接会找不到符号；`chiplab.c` 里给了一个 **弱桩 `board_nand_init()`**，
   将来驱动里的强符号自动覆盖。
 
-**尚未提供** NAND 控制器驱动，因此运行期 `nand`/`mtd`/`saveenv` 会失败（DTS 里 NAND 节点
-`status = "disabled"`）。驱动的寄存器语义、几何参数与 ECC 口径见
-`rv32gc-cpu/docs/porting/04-nand-driver.md` 与 PF §4/§9（U1/U2）。
+驱动已在阶段三 B-3 提供（`drivers/mtd/nand/raw/chiplab_nand.c` + `chiplab_nand.h`），
+寄存器语义、几何参数与 ECC 口径见 `rv32gc-cpu/docs/porting/04-nand-driver.md` 与 PF §4/§9。
+
+NAND 驱动（阶段三 B-3）
+-----------------------
+
+    drivers/mtd/nand/raw/chiplab_nand.c         控制器层（寄存器读写 / DMA 搬运 / 命令序列）
+    drivers/mtd/nand/raw/chiplab_nand.h         纯逻辑层（寄存器表 / 几何 / ECC / BBT / 地址换算）
+    board/loongson/chiplab/nand-unittest/run.sh 宿主机单元自测入口（fail-closed）
+    board/loongson/chiplab/nand-unittest/test_chiplab_nand.c
+
+分层原因：`chiplab_nand.h` 不依赖 U-Boot（只用 `<stdint.h>`/`<string.h>`），
+所以同一份头文件既能被 U-Boot 驱动 include，也能被宿主机单元测试直接编译 ——
+ECC 编解码、坏块表、地址换算、DMA 描述符打包等**全部可离线验证**，
+不依赖任何硬件或 qemu。
+
+### 控制器寄存器映射表（每条带 chiplab RTL 行号）
+
+RTL 唯一真源：`chiplab/IP/APB_DEV/NAND/nand.v`（模块 `NAND_top`，1430 行）。
+基址 `0x1FE7_8000`（软件侧 [RTL 实测] `la32r-Linux/.../ls1a_nand.c:86`）；
+平台 AXI mux 只译到高 16 位 `0x1FE7`（`chiplab/IP/AMBA/axi_mux_syn.v:856-857`），
+窗口内偏移由 `nand.v` 用 `ADDR[10:0]` 逐 4 字节译码（`nand.v:116-129`）。
+
+| 偏移 | 名称 | RTL 写侧 | RTL 读侧 | 读写语义 |
+|---|---|---|---|---|
+| `0x00` | `NAND_CMD` | `nand.v:171-173` | `nand.v:337` | 写 [15:0] 命令字；高位由硬件回填（[31] `NAND_DMA_REQ`、[28:24] `NAND_STATE`、[23:20] `NAND_CE_o`、[19:16] `NAND_IORDY_i`，`nand.v:180-182`） |
+| `0x04` | `NAND_ADDRL` | `nand.v:184` | `nand.v:339` | 列地址，取 `DAT_I[13:0]` → `nand_addr_c` |
+| `0x08` | `NAND_ADDRH` | `nand.v:185` | `nand.v:341` | 行地址，取 `DAT_I[24:0]` → `nand_addr_r` |
+| `0x0C` | `NAND_TIMING` | `nand.v:186-189` | `nand.v:343` | 时序；写值有下限钳位（`t[7:0]≥5`、`t[15:8]≥2`） |
+| `0x10` | `NAND_IDL` | —（只读） | `nand.v:345` | `ID_INFORM[31:0]` |
+| `0x14` | `NAND_STATUS_IDH` | —（只读） | `nand.v:347` | `{status[7:0], ID_INFORM[47:32]}`；`status` 采样于 `nand.v:1216`，`status[0]=1` 表示失败 |
+| `0x18` | `NAND_PARAM` | `nand.v:190` | `nand.v:349` | 几何参数；复位值由 `nand_type` 决定（`nand.v:159-161`，`2'h2` → `0x0800_5000`）；位域见下 |
+| `0x1C` | `NAND_OP_NUM` | `nand.v:191` | `nand.v:351` | 一次搬运的字节数 |
+| `0x20` | `NAND_CE_MAP0` | `nand.v:192` | `nand.v:353` | CE/RDY 映射 |
+| `0x24` | `NAND_CE_MAP1` | `nand.v:193` | `nand.v:355` | 写=CE 映射；未写时硬件回填 `{READ_MAX_COUNT, NAND_OP_NUM[15:0]}`（`nand.v:194`） |
+| `0x28` | `NAND_RDY_MAP0` | `nand.v:195` | `nand.v:357` | RDY 映射 |
+| `0x2C` | `NAND_RDY_MAP1` | `nand.v:196` | `nand.v:359` | 写=RDY 映射；未写时回填 `{WRITE_MAX_COUNT, NAND_OP_NUM[15:0]}`（`nand.v:197`） |
+| `0x40` | `NAND_DMA_DOORBELL` | `nand.v:128-129` | `nand.v:360-361` | **DMA 应答门铃**：`psel` 命中即拉高 `nand_dma_ack_i`；读回 `NAND_DAT_O_RD` |
+
+命令字位域（`0x00`，写侧）：
+
+| 位 | 名 | RTL |
+|---|---|---|
+| 0 | `CMD_VALID` | `nand.v:461/555/564` |
+| 1 | `READ` | `nand.v:470/478/486/607` |
+| 2 | `WRITE` | `nand.v:494/501/508/515/610` |
+| 3 | `ERASE` | `nand.v:520`（→ 命令 `0x60`） |
+| 4 | `ERASE_SERIAL` | `nand.v:524` |
+| 5 | `READ_ID` | `nand.v:526`（→ 命令 `0x90`） |
+| 6 | `RESET` | `nand.v:531`（→ `0xFF`） |
+| 7 | `READ_STATUS` | `nand.v:536`（→ `0x70`） |
+| 8 | `OP_MAIN` | `nand.v:206` |
+| 9 | `OP_SPARE` | `nand.v:207` |
+| 10 | `DONE`（只读） | `nand.v:635/952/1143` |
+| 11/12/15 | `ECC_RD`/`ECC_WR`/`RAM_OP` | **RTL 未引用**（控制器无硬件 ECC） |
+| 13 | `INT_EN` | `nand.v:208` |
+| [31] | `DMA_REQ`（只读） | `nand.v:180` |
+
+`NAND_PARAM`(0x18) 位域（`nand.v:203-205`）：`[29:16] op_scope`、
+`[14:12] nand_id_num`、`[11:8] nand_size`。
+
+### 平台 DMA 引擎（描述符驱动）
+
+RTL：`chiplab/IP/DMA/dma.v`（778 行）+ `chiplab/IP/CONFREG/confreg_syn.v:33`。
+CPU 只在 confreg 的 order 寄存器 `0x1FD0_1160` 写入描述符物理地址，
+引擎自行经 AXI 取描述符并搬运。
+
+| 描述符字（64 位） | 字段 | RTL |
+|---|---|---|
+| 字 0 | `{mem_addr, order_addr}` | `dma.v:559-562` |
+| 字 1 | `{length(4B 字数), dev_addr}` | `dma.v:563-566` |
+| 字 2 | `{step_times, step_length}` | `dma.v:567-570` |
+| 字 3 | `{状态（引擎回填）, cmd}` | `dma.v:571-574`（`cmd[12] = dma_r_w`） |
+
+* 描述符必须 **32 字节对齐**（`dma.v:141/470`），
+  要求 `step_times == 1`（否则 `dma_trans_over` 判定不同，`dma.v:257`）。
+* order 寄存器位：`[1:0] device_num`、`[2] ask_valid`（完成应答，`confreg_syn.v:326-329` 清零）、
+  `[3] dma_start`（`confreg_syn.v:326-329` 清零）、`[31:5]` 描述符地址（`dma.v:135-141`）。
+* **方向语义**：DMA 引擎对设备侧恒为「经门铃 `0x1FE78040` 读写」
+  （`dma.v:370 assign dma_ack_out = apb_psel`）；`cmd[12]` 只决定 DDR 侧方向
+  —— 读页用 0（设备→内存），写页用 1（内存→设备）。
+
+### ECC 与坏块布局（U-Boot / Linux 必须共用）
+
+算法：软件 BCH（GF(2^13)，可纠 **4 bit / 512 B 段**，段数 4）。
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 段大小 / 段数 | 512 B / 4 | `chiplab_nand.h:CHIPLAB_NAND_ECC_*` |
+| 每段 ECC | 7 B（52 校验位 + 4 填充位） | `ceil(13×4/8)` |
+| ECC 存放 | 备用区 offset **36..63**（尾部 28 B） | 与 `nand_bch_init()` 默认布局一致 |
+| 出厂坏块标记 | 备用区 offset **0**，非 `0xFF` 即坏 | 04-nand-driver.md §6.2 |
+| 运行时坏块标记 | 备用区 offset **1** | 同上 |
+| `oobfree` | offset 2..35（34 B） | 两者不重叠 |
+
+位序约定（**唯一约定**，`chiplab_nand.h` 顶部 + 单元测试 `test_bit_order` 锁死）：
+码字 `V(x) = Σ_p bit_p(data)·x^p + Σ_j E_j·x^(8n+j)`，
+`bit_p = (data[p>>3] >> (p&7)) & 1`（字节内 LSB 在前）、
+`E_j = (ecc[j>>3] >> (j&7)) & 1`。**将来 Linux 侧照搬这份约定**（共享常量、不共享 C 文件）。
+
+> 注意：本驱动的 ECC **不复用** U-Boot 框架自带的 `nand_bch_*` 位序，
+> 而是把 `chip->ecc.calculate/correct` 换成 `chiplab_nand.h` 的自包含实现
+> （见 `chiplab_nand.c` 的 probe 段）。这样 U-Boot 与将来 Linux 侧只有
+> **一份**位序定义，避免"两侧各自实现、看起来都能跑但互不兼容"。
+
+### 单元自测（宿主机，无需硬件）
+
+    board/loongson/chiplab/nand-unittest/run.sh
+
+覆盖：BCH 编解码（纠 1..4 bit、>4 bit 必 fail-closed、全 0/全 0xFF/伪随机三组）、
+位序约定锁定、坏块表与标记、几何/地址换算、DMA 描述符打包（含非法参数拒绝）。
+**未捕获即失败**：任何断言失败、编译失败或无断言输出都返回非 0。
+
+反证（mutation test）：
+
+```sh
+board/loongson/chiplab/nand-unittest/counter-proof.sh
+```
+
+脚本流程（**不使用 git checkout/stash/reset**）：
+
+1. `cp` 备份 `drivers/mtd/nand/raw/chiplab_nand.h`；
+2. `sed` 把解码侧能力上限 `CHIPLAB_ECC_DECODE_STRENGTH` 由 4 改成 3
+   （模拟"把 BCH-4 当 BCH-3 用"）；
+3. 跑 `run.sh --mutate-decode 3` —— **必须变红**（4 bit 错报 `-5`，无法纠正），
+   否则打印 `COUNTER-PROOF FAILED` 并非 0 退出；
+4. 从备份恢复头文件，并**校验恢复后的字面量**；
+5. 再跑一次正常模式，**必须全绿**。
+
+`run.sh` 自己也有两个模式可直接用：
+`run.sh --mutate-decode <n>`（断言必须红）与 `run.sh`（必须全绿）。
+
+### 上板前必须做的运行期验证（本机无硬件，未做）
+
+1. 实读器件 ID：期望 `ID_INFORM` 低字节 `EC F1`（`nand.v:345,347`），
+   驱动 probe 会打印 `ID_INFORM = ...`。若字节序不符，按 `nand.v:1332-1396`
+   的 `READ_ID` 状态机逐字节核对（B-3 只做静态推断，未上板实测）。
+2. 实读 `nand_parameter`：期望 `op_scope=2048`（与页容量一致）。
+3. 单页写 → 读回逐字节一致；人为注入 1 bit 错必须能纠正（04-nand-driver.md §7 N4/N6）。
+4. 块擦除后全 `0xFF`（N5）；人为标坏块后驱动正确跳过（N7）。
+5. DMA 描述符方向/完成判定：确认 order 寄存器 bit2/bit3 的握手时序（N8）。
 
 地址口径机器核对（含反证方法）
 ------------------------------
@@ -158,7 +296,11 @@ DDR3 bank（base/size）与 PF §2.1 的常量（`0x0` / 128 MiB）对账，不�
    注意：本板 DTS 是真实平台地址，用 `qemu-system-riscv32 -M virt` 冒烟会因
    `0x1fe001e0` 等地址不在 virt 内存图上而无法等价验证（只能验证“能跑到 SBI/串口初始化”
    之前的通用路径），真正的冒烟要在 chiplab 仿真/上板做。
-2. **NAND 驱动缺失**（见上），`saveenv`/`nand` 当前不可用。
+2. **NAND 驱动只到构建级 + 逻辑级验证**：本机无硬件、无 qemu，驱动未在真实
+   控制器上跑过。上板前必须完成的运行期验证清单见上面「NAND 驱动（阶段三 B-3）」
+   的「上板前必须做的运行期验证」小节（ID 实读、几何对账、页读写、擦除、ECC
+   注入、坏块跳过、DMA 握手）。其中 **ID 字节序**与 **DMA order 握手时序**
+   是两条最需要实测确认的静态推断。
 3. **CLINT/PLIC 无平台 RTL 佐证**（PF §9 U8）：核内译码实现时需把窗口写进
    `rtl/pkg/*defs.vh` 并回写 PF。
 4. **`riscv,isa` 采用传统字符串**（`rv32imafdc_zicsr_zifencei_zicntr_zicbom`）。

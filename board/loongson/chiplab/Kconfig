@@ -34,6 +34,9 @@ config BOARD_SPECIFIC_OPTIONS # dummy
 	# NAND 走 Linux 式自注册路径（控制器驱动自己注册 mtd/nand 设备）；
 	# 本树里 SYS_NAND_SELF_INIT 是隐藏符号，只能由板级/驱动 select，不能写进 defconfig。
 	select SYS_NAND_SELF_INIT
+	# 本板固定使用 chiplab APB NAND 控制器（无二次选择意义），
+	# 用 imply 保证默认可选、又允许 defconfig 显式覆盖。
+	imply NAND_CHIPLAB
 	imply SYS_NS16550
 	imply DM_SERIAL
 	imply MTD
