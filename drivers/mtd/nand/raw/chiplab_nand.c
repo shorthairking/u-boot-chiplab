@@ -61,6 +61,7 @@ struct chiplab_nand_priv {
 	u32 param;			/* 最近一次读回的 nand_parameter */
 	unsigned cursor;		/* read_buf/write_buf 的字节游标 */
 	unsigned frame_len;		/* 当前命令帧的总字节数 */
+	u32 page;			/* SEQIN 锁存的页号，PAGEPROG 用 */
 	u8 status;			/* 最近一次读到的状态字节 */
 };
 
@@ -278,14 +279,24 @@ static void cnand_cmdfunc(struct mtd_info *mtd, unsigned command, int column,
 	}
 
 	case NAND_CMD_SEQIN:
-		/* 清空缓冲区，等待 write_buf 填入（PAGEPROG 才真正提交） */
+		/*
+		 * 清空缓冲区，等待 write_buf 填入（PAGEPROG 才真正提交）。
+		 * 页号必须在这里锁存：框架的 nand_prog_page_begin_op() 用
+		 * (SEQIN, offset_in_page, page) 开始一次页编程，收尾的
+		 * nand_prog_page_end_op() 却只发 cmdfunc(PAGEPROG, -1, -1)
+		 * （页地址由**芯片**在 0x80 序列里锁存，框架不再重复传递）。
+		 * 控制器侧每写一次 ADDRH 就换一页，故不能用 PAGEPROG 的
+		 * page_addr —— 否则 (u32)-1 = 0xFFFFFFFF 会被截成 0xFFFF 行地址，
+		 * 数据被写到最后 1 页（B-3 未做运行期验证，未捕获）。
+		 */
+		p->page = (u32)page_addr;
 		memset(p->dma_buf + CHIPLAB_NAND_DMA_DATA_OFF, 0xff,
 		       CHIPLAB_NAND_PAGE_SPARE);
 		p->frame_len = CHIPLAB_NAND_PAGE_SPARE;
 		break;
 
 	case NAND_CMD_PAGEPROG:
-		(void)cnand_page_write(p, (u32)page_addr);
+		(void)cnand_page_write(p, p->page);
 		break;
 
 	case NAND_CMD_READ1:
@@ -517,20 +528,27 @@ void board_nand_init(void)
 	chip = calloc(1, sizeof(*chip));
 	if (!chip)
 		goto err_p;
-	mtd = calloc(1, sizeof(*mtd));
-	if (!mtd)
-		goto err_chip;
+	/*
+	 * struct mtd_info 是 struct nand_chip 的**第一个成员**
+	 * （include/linux/mtd/rawnand.h:915；与 Linux 5.10+ 同口径），
+	 * mtd_to_nand() 走 container_of() 反查。因此必须把**内嵌的 chip->mtd**
+	 * 交给框架：若沿用旧 API 单独 calloc 一份 mtd，nand_scan() 会把那份 mtd
+	 * 当作 nand_chip，驱动装在本 chip 上的 cmdfunc/read_buf/write_buf/...
+	 * 全部不可见，框架退回默认 nand_command() 并调用为 NULL 的
+	 * chip->cmd_ctrl，表现为 jalr 跳 0 崩溃（B-3 只做构建级验证，未捕获）。
+	 */
+	mtd = &chip->mtd;
 
 	p->base = map_physmem(CHIPLAB_NAND_BASE, SZ_4K, MAP_NOCACHE);
 	if (!p->base) {
 		printf("chiplab-nand: cannot map controller @%lx\n",
 		       CHIPLAB_NAND_BASE);
-		goto err_mtd;
+		goto err_chip;
 	}
 	p->dma_buf = memalign(CHIPLAB_DMA_ORDER_ALIGN, CHIPLAB_NAND_DMA_BUF_SIZE);
 	if (!p->dma_buf) {
 		printf("chiplab-nand: cannot allocate DMA buffer\n");
-		goto err_mtd;
+		goto err_chip;
 	}
 	p->dma_buf_phys = (ulong)p->dma_buf;	/* 无 MMU：虚拟 == 物理 */
 
@@ -616,8 +634,6 @@ void board_nand_init(void)
 
 err_buf:
 	free(p->dma_buf);
-err_mtd:
-	free(mtd);
 err_chip:
 	free(chip);
 err_p:
