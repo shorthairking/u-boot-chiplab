@@ -65,6 +65,30 @@ struct chiplab_nand_priv {
 	u8 status;			/* 最近一次读到的状态字节 */
 };
 
+/*
+ * 备用区布局（**与 Linux 侧共用的唯一契约**，见 04-nand-driver.md §4.3 与
+ * chiplab_nand.h §3）：
+ *   offset 0..1   出厂/运行时坏块标记（非 0xFF 即坏块）
+ *   offset 2..35  oobfree（34 B，BBT 等可用）
+ *   offset 36..63 ECC（4 段 × 7 B，段 j 占 36+7j .. 36+7j+6）
+ * 必须在 nand_scan() **之前**挂到 chip->ecc.layout 上：框架只在
+ * ecc->layout 为空时才套用 nand_oob_64 默认表（nand_base.c:4959-4975），
+ * 自带表会被原样保留。这样 eccpos/oobfree 与 Linux 侧逐字节同源。
+ */
+static struct nand_ecclayout chiplab_nand_oob_64 = {
+	.eccbytes = CHIPLAB_NAND_ECC_TOTAL_BYTES,
+	.eccpos = {
+		36, 37, 38, 39, 40, 41, 42,
+		43, 44, 45, 46, 47, 48, 49,
+		50, 51, 52, 53, 54, 55, 56,
+		57, 58, 59, 60, 61, 62, 63,
+	},
+	.oobfree = {
+		{ .offset = 2,
+		  .length = CHIPLAB_NAND_OOBSIZE - CHIPLAB_NAND_ECC_TOTAL_BYTES - 2 },
+	},
+};
+
 static inline u32 cnand_rd(struct chiplab_nand_priv *p, u32 off)
 {
 	return readl(p->base + off);
@@ -265,9 +289,25 @@ static void cnand_cmdfunc(struct mtd_info *mtd, unsigned command, int column,
 	case NAND_CMD_READOOB:
 	{
 		u32 page = (u32)page_addr;
+		u32 col = (column < 0) ? 0u : (u32)column;
 
-		if (column >= (int)CHIPLAB_NAND_PAGE_SIZE)
-			page += (u32)(column / CHIPLAB_NAND_PAGE_SIZE);
+		/*
+		 * 帧内定位（一次搬运 = main 2048 B + spare 64 B 的连续 2112 B 帧）：
+		 *   READ0    —— column 是**页内**偏移（0..2047 主区，>=2048 即备用区）；
+		 *   READOOB  —— column 是**备用区内**偏移（框架 nand_read_oob_op()
+		 *               传 offset_in_oob，见 nand_base.c:1210），必须加上
+		 *               2048 才落在备用区；否则随后 read_buf(oobsize) 会把
+		 *               主区前 64 B 当作 OOB 返回——坏块标记扫描
+		 *               （nand_bbt.c:413 scan_block_fast 走 read_oob，只读 OOB）
+		 *               会因此把"首字节非 0xFF 的正常数据块"误判成坏块。
+		 * 定位后再按芯片线性地址（row:column）把溢出部分顺延到下一页。
+		 */
+		if (command == NAND_CMD_READOOB)
+			col += CHIPLAB_NAND_PAGE_SIZE;
+		if (col >= CHIPLAB_NAND_PAGE_SPARE) {
+			page += col / CHIPLAB_NAND_PAGE_SPARE;
+			col %= CHIPLAB_NAND_PAGE_SPARE;
+		}
 		if (cnand_page_read(p, page)) {
 			/* 失败时也把 frame 置满，避免框架读到越界数据 */
 			p->cursor = CHIPLAB_NAND_PAGE_SPARE;
@@ -275,6 +315,7 @@ static void cnand_cmdfunc(struct mtd_info *mtd, unsigned command, int column,
 			break;
 		}
 		p->frame_len = CHIPLAB_NAND_PAGE_SPARE;
+		p->cursor = col;
 		break;
 	}
 
@@ -346,7 +387,12 @@ static uint8_t cnand_read_byte(struct mtd_info *mtd)
 		u32 idl = cnand_rd(p, CHIPLAB_NAND_REG_IDL);
 		u32 sth = cnand_rd(p, CHIPLAB_NAND_REG_STATUS_IDH);
 
-		/* ID_INFORM[39:0]：IDL[39:8] 不可得，故按 HIT4/HIT5 拼接 */
+		/*
+		 * 前 4 字节在 HIT4=ID_INFORM[31:0]；HIT5 = {status[7:0],
+		 * ID_INFORM[47:32]}（nand.v:347），故第 5 字节（ID_INFORM[39:32]）
+		 * 在 sth[7:0]、第 6 字节（ID_INFORM[47:40]）在 sth[15:8]。
+		 * 旧实现从 sth[15:8] 起取，等于把第 6 字节当第 5 字节报出去。
+		 */
 		switch (p->cursor) {
 		case 0:
 			v = (u8)(idl >> 0);
@@ -360,8 +406,14 @@ static uint8_t cnand_read_byte(struct mtd_info *mtd)
 		case 3:
 			v = (u8)(idl >> 24);
 			break;
+		case 4:
+			v = (u8)(sth >> 0);
+			break;
+		case 5:
+			v = (u8)(sth >> 8);
+			break;
 		default:
-			v = (u8)(sth >> (((p->cursor - 4) * 8) + 8));
+			v = 0x00;	/* 器件只回 5 字节，其余补 0 */
 			break;
 		}
 		break;
@@ -429,11 +481,28 @@ static int cnand_ecc_correct(struct mtd_info *mtd, u_char *dat, u_char *read_ecc
 	/* 翻转位数由解码器返回；负值表示超出纠正能力（fail-closed） */
 	ret = chiplab_bch_decode(&chiplab_ecc_bch, dat, chip->ecc.size,
 				 read_ecc, CHIPLAB_NAND_ECC_BYTES_PER_STEP);
-	if (ret < 0) {
-		debug("chiplab-nand: ECC uncorrectable (%d)\n", ret);
+	if (ret >= 0)
+		return ret;	/* 0..t：纠正的 bit 数 */
+
+	/*
+	 * 解码失败时先判**擦除态页**：全 0xFF 数据经 BCH 编码并不得到全 0xFF
+	 * 校验位，硬解会把每个刚擦除的页都判成不可纠（现象：空白芯片读 env 直接
+	 * -EBADMSG/-74）。框架的 SW ECC 路径不做这个判断，由驱动的 correct()
+	 * 负责——沿用框架自己的擦除判据 nand_check_erased_ecc_chunk()
+	 * （rawnand.h:1339 导出；语义见 nand_base.c:1726-1760）：
+	 * 数据段 + 校验段里 0 的个数 ≤ 阈值即视为擦除页，并把不足 0xFF 的位补回。
+	 * 超过阈值 → 仍返回 -EBADMSG，交由框架计 ecc_stats.failed（fail-closed，
+	 * 绝不静默返回错误数据）。
+	 */
+	ret = nand_check_erased_ecc_chunk(dat, chip->ecc.size,
+					  read_ecc,
+					  CHIPLAB_NAND_ECC_BYTES_PER_STEP,
+					  NULL, 0, chip->ecc.strength);
+	if (ret >= 0)
 		return ret;
-	}
-	return ret;	/* 0..t：纠正的 bit 数 */
+
+	debug("chiplab-nand: ECC uncorrectable, erased-check failed (%d)\n", ret);
+	return -EBADMSG;
 }
 
 static void cnand_select_chip(struct mtd_info *mtd, int chip)
@@ -472,8 +541,8 @@ static void cnand_print_ids(struct chiplab_nand_priv *p)
 	id[1] = (u8)(idl >> 1 * 8);
 	id[2] = (u8)(idl >> 2 * 8);
 	id[3] = (u8)(idl >> 3 * 8);
-	id[4] = (u8)(sth >> 1 * 8);
-	id[5] = (u8)(sth >> 2 * 8);
+	id[4] = (u8)(sth >> 0 * 8);	/* ID_INFORM[39:32]：第 5 字节 */
+	id[5] = (u8)(sth >> 1 * 8);	/* ID_INFORM[47:40]：第 6 字节 */
 
 	printf("chiplab-nand: ID_INFORM = %02x %02x %02x %02x %02x %02x "
 	       "(expect %02x %02x ..)\n",
@@ -614,12 +683,42 @@ void board_nand_init(void)
 	chip->ecc.strength = CONFIG_NAND_CHIPLAB_ECC_STRENGTH;
 	chip->ecc.calculate = cnand_ecc_calculate;
 	chip->ecc.correct = cnand_ecc_correct;
+	chip->ecc.layout = &chiplab_nand_oob_64;
 
 	ret = nand_scan(mtd, 1);
 	if (ret) {
 		printf("chiplab-nand: nand_scan failed (%d)\n", ret);
 		goto err_buf;
 	}
+
+	/*
+	 * 把自包含 BCH-4 装回去。
+	 *
+	 * 框架的 NAND_ECC_SOFT 分支会**无条件**覆盖 calculate/correct（换成通用
+	 * Hamming-1 实现）、把 ecc.bytes 压成 3、ecc.strength 压成 1
+	 * （nand_base.c:5055-5066），所以扫描完必须补回来，否则运行期打印是
+	 * "ECC BCH-1/512B"，写进备用区的也不是 BCH-4 校验位。
+	 * ecc.steps 由框架按 ecc.size=512 算成 4（nand_base.c:5147），eccpos/
+	 * oobfree 由 chiplab_nand_oob_64 保证，两者都不需要重算。
+	 */
+	if (chip->ecc.size != CHIPLAB_NAND_ECC_STEP_SIZE ||
+	    chip->ecc.steps != CHIPLAB_NAND_ECC_STEPS ||
+	    chip->ecc.layout != &chiplab_nand_oob_64) {
+		printf("chiplab-nand: unexpected ECC geometry after scan "
+		       "(size=%u steps=%u layout=%p)\n",
+		       chip->ecc.size, chip->ecc.steps, (void *)chip->ecc.layout);
+		nand_unregister(mtd);
+		goto err_buf;
+	}
+	chip->ecc.calculate = cnand_ecc_calculate;
+	chip->ecc.correct = cnand_ecc_correct;
+	chip->ecc.bytes = CHIPLAB_NAND_ECC_BYTES_PER_STEP;	/* 7 */
+	chip->ecc.total = CHIPLAB_NAND_ECC_TOTAL_BYTES;		/* 28 */
+	chip->ecc.strength = CONFIG_NAND_CHIPLAB_ECC_STRENGTH;	/* 4 */
+	mtd->ecc_strength = chip->ecc.strength;
+	mtd->ecc_step_size = chip->ecc.size;
+	/* DIV_ROUND_UP(strength * 3, 4)，与 nand_base.c:5215 同口径 */
+	mtd->bitflip_threshold = (mtd->ecc_strength * 3 + 3) / 4;
 	if (cnand_check_geometry(mtd)) {
 		nand_unregister(mtd);
 		goto err_buf;
