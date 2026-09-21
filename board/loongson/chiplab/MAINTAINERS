@@ -1,0 +1,7 @@
+LOONGSON CHIPLAB RV32 BOARD
+M:	RV32-GC project <noreply@localhost>
+S:	Maintained
+F:	board/loongson/chiplab/
+F:	include/configs/chiplab-rv32.h
+F:	configs/chiplab_rv32_defconfig
+F:	arch/riscv/dts/chiplab-rv32.dts

@@ -17,6 +17,9 @@ config TARGET_ANDES_VOYAGER
 config TARGET_BEAGLEBOARD_BEAGLEVFIRE
 	bool "Support BeagleBoard BeagleV-Fire Board (based on Microchip MPFS)"
 
+config TARGET_CHIPLAB_RV32
+	bool "Support Loongson Chiplab RV32 Board"
+
 config TARGET_K230_CANMV
 	bool "Support K230 CanMV Board"
 
@@ -115,6 +118,7 @@ source "board/aspeed/ibex_ast2700/Kconfig"
 source "board/beagle/beaglev_fire/Kconfig"
 source "board/canaan/k230_canmv/Kconfig"
 source "board/emulation/qemu-riscv/Kconfig"
+source "board/loongson/chiplab/Kconfig"
 source "board/microchip/mpfs_generic/Kconfig"
 source "board/openpiton/riscv64/Kconfig"
 source "board/sifive/unleashed/Kconfig"

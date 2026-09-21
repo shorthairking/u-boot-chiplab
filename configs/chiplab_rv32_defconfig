@@ -1,0 +1,58 @@
+# Loongson Chiplab RV32 board (Artix-7 A200T 实验箱) — U-Boot in S-mode
+#
+# 地址/时钟口径唯一真源：rv32gc-cpu/docs/kb/platform-facts.md
+# 移植方案：rv32gc-cpu/docs/porting/02-uboot.md
+# 构建：make ARCH=riscv CROSS_COMPILE=riscv32-unknown-linux-gnu- chiplab_rv32_defconfig && make ...
+
+CONFIG_RISCV=y
+CONFIG_ARCH_RV32I=y
+CONFIG_TARGET_CHIPLAB_RV32=y
+# U-Boot 在 S 模式运行；M 模式（含 CLINT/SBI）由 OpenSBI 负责
+CONFIG_RISCV_SMODE=y
+CONFIG_DEFAULT_DEVICE_TREE="chiplab-rv32"
+CONFIG_OF_CONTROL=y
+CONFIG_OF_SEPARATE=y
+
+# DDR3 128 MiB @ 0x0000_0000：U-Boot 代码 0x0200_0000，重定位前栈 0x01e0_0000，
+# 重定位区在 DDR 顶端（见 include/configs/chiplab-rv32.h 的地址划分表）
+CONFIG_NR_DRAM_BANKS=1
+CONFIG_HAS_CUSTOM_SYS_INIT_SP_ADDR=y
+CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x01e00000
+CONFIG_SYS_MALLOC_LEN=0x400000
+CONFIG_SYS_MONITOR_LEN=786432
+CONFIG_SYS_LOAD_ADDR=0x04000000
+CONFIG_DISPLAY_CPUINFO=y
+CONFIG_DISPLAY_BOARDINFO=y
+
+# 16550 UART @ 0x1FE0_01E0, 33 MHz, 115200（platform-facts.md §2.5/§5）
+CONFIG_BAUDRATE=115200
+CONFIG_SYS_NS16550=y
+CONFIG_DM_SERIAL=y
+CONFIG_DEBUG_UART=y
+CONFIG_DEBUG_UART_NS16550=y
+CONFIG_DEBUG_UART_BASE=0x1fe001e0
+CONFIG_DEBUG_UART_CLOCK=33000000
+CONFIG_DEBUG_UART_SHIFT=0
+
+# NAND / MTD 预留：控制器驱动在 NAND 阶段补齐（docs/porting/04-nand-driver.md）；
+# SYS_NAND_SELF_INIT 由 board/loongson/chiplab/Kconfig select（隐藏符号，写这里会被丢弃）；
+# 环境变量区 = NAND 头部 2 个 128 KiB 块（256 KiB），与分区表 256K(env) 一致
+CONFIG_MTD=y
+CONFIG_MTD_RAW_NAND=y
+CONFIG_CMD_MTD=y
+CONFIG_CMD_NAND=y
+CONFIG_CMD_MTDPARTS=y
+CONFIG_CMD_BOOTM=y
+CONFIG_CMD_BOOTI=y
+CONFIG_ENV_IS_IN_NAND=y
+CONFIG_ENV_SIZE=0x20000
+CONFIG_ENV_OFFSET=0x0
+CONFIG_ENV_RANGE=0x40000
+
+# S 模式复位/关机走 SBI（SBI v0.2+）
+CONFIG_SYSRESET=y
+
+# 宿主机缺 libgnutls28-dev，且 EFI capsule 生成工具与本板无关：
+# 关掉它，保证 `make chiplab_rv32_defconfig && make` 在纯净宿主上可直接通过
+# （详见 board/loongson/chiplab/README 的“构建环境”一节）
+# CONFIG_TOOLS_MKEFICAPSULE is not set

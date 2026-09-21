@@ -1,0 +1,172 @@
+Loongson Chiplab RV32 — U-Boot 板级骨架
+========================================
+
+本目录是 RV32-GC 项目在**上游 u-boot（用户 fork，2026.10 基线）** 上新增的
+chiplab 板级支持（阶段三 B-2）。U-Boot 取 **S 模式**（`CONFIG_RISCV_SMODE=y`），
+M 模式（含 CLINT 定时器、IPI、复位）由 OpenSBI 负责，U-Boot 通过 SBI 调用获得服务。
+
+上游基线树：`/home/shorthair/dsh/rv32-cpu/u-boot/`（分支 `dev`，`VERSION = 2026`、
+`PATCHLEVEL = 10`）。旧文档 `rv32gc-cpu/docs/porting/02-uboot.md` 中基于
+`la32r-uboot`(2019.07) 的口径**已作废**，替换说明见该文件末尾「基线变更」章节。
+
+文件清单
+--------
+
+    board/loongson/chiplab/Kconfig            板级 Kconfig（TARGET_CHIPLAB_RV32 分支）
+    board/loongson/chiplab/Makefile
+    board/loongson/chiplab/chiplab.c          板级 DDR3 bank 核对（与平台事实对账）
+    board/loongson/chiplab/MAINTAINERS
+    board/loongson/chiplab/README             本文件
+    board/loongson/chiplab/check-addresses.sh 地址口径机器核对脚本（fail-closed）
+    configs/chiplab_rv32_defconfig
+    include/configs/chiplab-rv32.h
+    arch/riscv/dts/chiplab-rv32.dts
+    arch/riscv/Kconfig                        +TARGET_CHIPLAB_RV32、+source 本目录 Kconfig
+    arch/riscv/dts/Makefile                   +dtb-$(CONFIG_TARGET_CHIPLAB_RV32)
+
+构建（可复现）
+--------------
+
+    cd /home/shorthair/dsh/rv32-cpu/u-boot
+    make ARCH=riscv CROSS_COMPILE=riscv32-unknown-linux-gnu- chiplab_rv32_defconfig
+    make ARCH=riscv CROSS_COMPILE=riscv32-unknown-linux-gnu- -j"$(nproc)"
+
+产物：`u-boot.bin`（含独立 DTB 段：`u-boot-nodtb.bin` + `u-boot.dtb`）。
+
+* 工具链：`/opt/riscv/bin/riscv32-unknown-linux-gnu-gcc`，**GCC 16.1.0**（`--version` 实测）。
+* 口径：`ARCH=riscv`、`CROSS_COMPILE=riscv32-unknown-linux-gnu-`，所有 `make` 调用
+  （含 `*_defconfig`）都必须带这两个变量。
+* 构建环境坑（B-1 打样时踩到）：本宿主机**缺 `libgnutls28-dev`**，而 U-Boot 的
+  `make tools` 会因 `CONFIG_TOOLS_MKEFICAPSULE`（`default y if EFI_LOADER`）编译
+  `tools/mkeficapsule.c` 而失败：
+  `tools/mkeficapsule.c:20:10: fatal error: gnutls/gnutls.h: No such file or directory`。
+  本板用不到 EFI capsule 工具，因此 defconfig 里显式 `# CONFIG_TOOLS_MKEFICAPSULE is not set`，
+  使上面两条命令在纯净宿主机上直接通过。（安装 `libgnutls28-dev` 后可去掉该行。）
+
+地址/时钟口径对应表（DTS ↔ 平台事实台账）
+-----------------------------------------
+
+平台事实唯一真源：`rv32gc-cpu/docs/kb/platform-facts.md`（下称 PF）。
+`[强度]` 沿用 PF 的标注约定。
+
+| 对象 | DTS/defconfig 值 | PF 依据（行号） | 强度 |
+|---|---|---|---|
+| DDR3 | `memory@0 reg = <0x00000000 0x08000000>`（128 MiB） | §2.1，PF:70（AXI 默认从设备，`0x0000_0000–0x07FF_FFFF`） | [RTL 实测]（`axi_mux_syn.v:860,951`） |
+| UART 16550 | `serial@1fe001e0`、`CONFIG_DEBUG_UART_BASE=0x1fe001e0` | §2.5，PF:104（`0x1FE0_01E0`；§2.5 PF:110 注明窗口内偏移含转述成分） | [RTL 实测] 窗口 +[旧项目转述] 偏移 |
+| 波特率/时钟 | `current-speed = <115200>`、`clock-frequency = <33000000>`（= `CONFIG_DEBUG_UART_CLOCK`、`RISCV_SMODE_TIMER_FREQ`） | §5，PF:175（`config.h:33 FREQ=32'd33000000`）；PF:169-174（33 MHz 同域） | [RTL 实测] |
+| `/cpus/timebase-frequency` | `33000000` | 同上（PF §5） | [RTL 实测] |
+| CLINT | `clint@1f000000` | §2.4，PF:95 | [旧项目转述]（平台无 RTL 常量，§9 U8 待关闭） |
+| PLIC | `plic@1f100000` | §2.4，PF:96 | [旧项目转述]（同上） |
+| SPI XIP | `spi-xip@1c000000`（16 MiB，`status = "disabled"`） | §2.3，PF:89（主窗口 `0x1C00_0000`，别名 `0x1FE8_0000`） | [RTL 实测] |
+| NAND（预留） | `nand@1fe78000`（`status = "disabled"`） | §2.5 PF:105 / §4.2 PF:156（门铃 `0x1FE7_8040`） | 软件侧 [RTL 实测] |
+| env 区 | `CONFIG_ENV_OFFSET=0x0`、`CONFIG_ENV_SIZE=0x20000`、`CONFIG_ENV_RANGE=0x40000` | 分区表 `256K(env)`：docs/porting/01-overview.md §3.1 + 02-uboot.md §3.4（2 个 128 KiB 块） | [工程约定] |
+| 运行地址 | `TEXT_BASE=0x02000000`、`CUSTOM_SYS_INIT_SP_ADDR=0x01e00000` | docs/porting/01-overview.md §2.3（U-Boot 运行地址 `0x0200_0000`；OpenSBI `0x0100_0000`） | [工程约定] |
+
+UART `reg-shift = <0>`（寄存器按 1 字节间隔）的依据（三条独立证据）：
+
+1. 平台 UART 顶层直接把 `PADDR[2:0]` 当寄存器号：
+   `chiplab/IP/APB_DEV/URT/uart_top.v:86`（`.addr (PADDR[2:0])`）；
+   `chiplab/IP/APB_DEV/apb_dev_top_with_nand.v:364` 把 `apb_uart0_addr[7:0]` 接到 `PADDR`。
+2. AXI→APB 桥把 AXI 字节地址原样透传：
+   `chiplab/IP/AMBA/axi2apb.v:168`（`assign reg_addr = axi_s_req_addr;`）、
+   `:216`（`axi_s_req_addr <= axi_s_awaddr[19:0]`），窄访问按字节步进 `+1`（同文件 `:220-240`）。
+   → 寄存器落位 `0x1FE0_01E0 + 0..7`（RBR…SCR），故 `reg-shift=0`、`reg-io-width=1`。
+3. 旧树同 IP 口径：`la32r-uboot/arch/la32r/include/asm/ns16550.h:2`（`COM0_BASE_ADDR 0x1fe001e0`）、
+   `:10-18`（`NS16550_DATA 0` … `NS16550_SCR 7`）、
+   `la32r-uboot/configs/la32rsoc_defconfig:805`（`CONFIG_DEBUG_UART_SHIFT=0`）。
+
+> 注意：若把 `reg-shift` 写成 2（4 字节间隔），U-Boot 会去访问 `0x1FE0_01E4` 等**未对齐/错位**地址，
+> 现象是控制台乱码或全无输出——本板 DTS 已按 `reg-shift=0` 固定。
+> UART 节点故意**不带** `interrupts`：平台 `intrpt` 只给核 5 位（PF §1.2），PLIC/中断映射表
+> 未定（PF §9 U5），控制台不需要中断。
+
+NAND / MTD 预留（本阶段只做编译期预留）
+---------------------------------------
+
+`configs/chiplab_rv32_defconfig` 已打开 MTD 栈与 NAND 命令，并预留 `ENV_IS_IN_NAND`：
+
+    CONFIG_MTD=y
+    CONFIG_MTD_RAW_NAND=y
+    CONFIG_CMD_MTD=y / CONFIG_CMD_NAND=y / CONFIG_CMD_MTDPARTS=y
+    CONFIG_ENV_IS_IN_NAND=y  CONFIG_ENV_OFFSET=0x0  ENV_SIZE=0x20000  ENV_RANGE=0x40000
+
+两个绕不开的树内约束（都踩过、已按上游惯例处理）：
+
+* `SYS_NAND_SELF_INIT` 是**隐藏符号**（`drivers/mtd/nand/raw/Kconfig:6`，
+  `depends on MTD_RAW_NAND`、无 prompt）——写进 defconfig 会被**静默丢弃**。
+  本板改为在 `board/loongson/chiplab/Kconfig` 里 `select SYS_NAND_SELF_INIT`。
+* 该路径下 `nand_init()` 会调用 `board_nand_init()`（`drivers/mtd/nand/raw/nand.c:191`），
+  而本阶段还没有控制器驱动，链接会找不到符号；`chiplab.c` 里给了一个 **弱桩 `board_nand_init()`**，
+  将来驱动里的强符号自动覆盖。
+
+**尚未提供** NAND 控制器驱动，因此运行期 `nand`/`mtd`/`saveenv` 会失败（DTS 里 NAND 节点
+`status = "disabled"`）。驱动的寄存器语义、几何参数与 ECC 口径见
+`rv32gc-cpu/docs/porting/04-nand-driver.md` 与 PF §4/§9（U1/U2）。
+
+地址口径机器核对（含反证方法）
+------------------------------
+
+    board/loongson/chiplab/check-addresses.sh
+
+脚本做四类核对，任一条未命中即 `exit 1`（兜底文案不含 PASS）：
+
+1. **DTS 节点级**：先用 `dtc` 把 DTS 编成 DTB 再反解成规范 DTS，只检查真实的
+   `reg`/属性值（**绕过注释**——直接在源码里 grep 地址会被注释命中，改错 reg 也能"通过"）；
+   逐条核对 `memory@*`、`clint@1f000000`、`plic@1f100000`、`serial@1fe001e0`、
+   `spi-xip@1c000000`、`nand@1fe78000` 的 `reg`，以及 UART 的 `clock-frequency/current-speed/
+   reg-shift/reg-io-width`、`/cpus` 的 `timebase-frequency`、CPU 的 `mmu-type`/`riscv,isa`。
+2. **platform-facts 同口径 + 派生校验**：台账里必须出现同一批地址字面量；并由台账的
+   DDR3 上界 `0x07FF_FFFF` 派生 `+1 = 0x0800_0000`，要求等于 DTS `/memory` 的 size。
+3. **defconfig ↔ DTS 交叉一致**：`DEBUG_UART_BASE`/`DEBUG_UART_CLOCK`/`BAUDRATE` 必须与
+   DTS 节点同值；`ENV_RANGE` 必须 = 256 KiB = 2×128 KiB 块；`TEXT_BASE` 必须落在 DDR3 内
+   且在重定位前栈之上。
+4. **命名口径**：新文件里不得出现 `RISCV_M_MODE`（本树无此符号）与 2019 时代的
+   `CONFIG_SYS_TEXT_BASE`；运行模式必须是纯 `RISCV_SMODE`。
+
+**反证（两条，改完必须回红；本项目实跑记录）**：
+
+```sh
+D=arch/riscv/dts/chiplab-rv32.dts ; C=configs/chiplab_rv32_defconfig
+cp "$D" /tmp/dts.bak ; cp "$C" /tmp/defconfig.bak
+
+# A. 只改 DTS 的 UART reg（注释与 node 名保持原样）
+sed -i 's|reg = <0x1fe001e0 0x100>|reg = <0x1fe00000 0x100>|' "$D"
+dtc -I dts -O dtb -o /tmp/negA.dtb "$D"            # 仍然 rc=0（合法 DTS 骗不过口径）
+board/loongson/chiplab/check-addresses.sh          # 必须 rc=1
+cp /tmp/dts.bak "$D"
+
+# B. 只改 defconfig 的 UART 基址
+sed -i 's|^CONFIG_DEBUG_UART_BASE=0x1fe001e0$|CONFIG_DEBUG_UART_BASE=0x1fe00000|' "$C"
+board/loongson/chiplab/check-addresses.sh          # 必须 rc=1（交叉核对抓到两侧分叉）
+cp /tmp/defconfig.bak "$C"
+```
+
+即 `dtc` 只能保证语法/结构正确，**不能**保证地址口径与平台事实一致；两者互补。
+
+运行期自检
+----------
+
+`board/loongson/chiplab/chiplab.c:board_init()` 把运行期从自带 DTS `/memory` 得到的
+DDR3 bank（base/size）与 PF §2.1 的常量（`0x0` / 128 MiB）对账，不一致就返回非 0
+（U-Boot 在该 initcall 处停下），避免带着错的内存图继续启动。
+
+遗留 / 风险
+-----------
+
+1. **无 qemu 冒烟**：本机无 `qemu-system-riscv32`（`which` 实测缺失），B-1/B-2 只到
+   构建级验证。要跑到提示符需在宿主安装 qemu（**未做，未提权安装**）。
+   注意：本板 DTS 是真实平台地址，用 `qemu-system-riscv32 -M virt` 冒烟会因
+   `0x1fe001e0` 等地址不在 virt 内存图上而无法等价验证（只能验证“能跑到 SBI/串口初始化”
+   之前的通用路径），真正的冒烟要在 chiplab 仿真/上板做。
+2. **NAND 驱动缺失**（见上），`saveenv`/`nand` 当前不可用。
+3. **CLINT/PLIC 无平台 RTL 佐证**（PF §9 U8）：核内译码实现时需把窗口写进
+   `rtl/pkg/*defs.vh` 并回写 PF。
+4. **`riscv,isa` 采用传统字符串**（`rv32imafdc_zicsr_zifencei_zicntr_zicbom`）。
+   较新的 Linux 需要 `riscv,isa-base` + `riscv,isa-extensions`；U-Boot 2026.10 两者都认，
+   Linux 阶段若报 deprecated 警告再按需补 `riscv,isa-extensions`（需与核实际扩展逐条对齐）。
+5. **UART 窗口内偏移**（`+0x1E0`）在平台 RTL 里不是显式常量（PF §2.5/U3），
+   依据是 §2.5 台账 + 旧树软件口径；上板首轮串口若无声，先按 PF §9 U3 反查
+   `apb_dev_top_with_nand.v` 的从口译码。
+6. **`/memory` = 128 MiB 全给 Linux**：U-Boot 重定位到 DDR 顶端 ~6 MiB（`SYS_MALLOC_LEN=4 MiB`），
+   内核加载地址 `0x0400_0000`（`kernel_addr_r`）。这些是 [工程约定]，最终需与
+   `docs/porting/01-overview.md` §2.3 和内核 phase 的地址表统一。

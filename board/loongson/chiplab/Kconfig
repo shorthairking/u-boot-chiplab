@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-2.0+
+#
+# Loongson Chiplab RV32 (Artix-7 A200T 实验箱) board
+#
+# 地址/时钟口径唯一真源：rv32gc-cpu/docs/kb/platform-facts.md
+#   DDR3       0x0000_0000 - 0x07FF_FFFF (128 MiB)   §2.1
+#   UART 16550 0x1FE0_01E0 (33 MHz, 115200)          §2.5 / §5
+#   CLINT      0x1F00_0000 (核内私有，平台 AXI 不译码) §2.4
+#   PLIC       0x1F10_0000 (同上)                     §2.4
+#   SPI XIP    0x1C00_0000 (别名 0x1FE8_0000)         §2.3
+
+if TARGET_CHIPLAB_RV32
+
+config SYS_BOARD
+	default "chiplab"
+
+config SYS_VENDOR
+	default "loongson"
+
+config SYS_CPU
+	default "generic"
+
+config SYS_CONFIG_NAME
+	default "chiplab-rv32"
+
+# U-Boot 运行在 S 模式，由 OpenSBI(阶段四) 装载到 DDR3 0x0200_0000。
+# 见 rv32gc-cpu/docs/porting/01-overview.md §2.3 (DDR 内布局约定)
+config TEXT_BASE
+	default 0x02000000
+
+config BOARD_SPECIFIC_OPTIONS # dummy
+	def_bool y
+	select GENERIC_RISCV
+	# NAND 走 Linux 式自注册路径（控制器驱动自己注册 mtd/nand 设备）；
+	# 本树里 SYS_NAND_SELF_INIT 是隐藏符号，只能由板级/驱动 select，不能写进 defconfig。
+	select SYS_NAND_SELF_INIT
+	imply SYS_NS16550
+	imply DM_SERIAL
+	imply MTD
+	imply MTD_RAW_NAND
+	imply CMD_MTD
+	imply CMD_NAND
+	imply SYSRESET
+
+endif
