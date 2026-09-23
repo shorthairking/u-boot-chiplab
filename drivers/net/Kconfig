@@ -483,6 +483,21 @@ config FSL_FM_10GEC_REGULAR_NOTATION
 	  new SoCs on which 10GEC enumeration is consistent with MAC
 	  enumeration.
 
+config ETH_CHIPLAB_DMFE
+	bool "Loongson Chiplab DEC 21140 (Tulip) compatible MAC"
+	depends on NET_LEGACY
+	select PHYLIB
+	help
+	  This driver supports the DEC 21140 "Tulip" compatible MAC
+	  controller integrated in the Loongson Chiplab FPGA SoC
+	  (chiplab/IP/MAC). The controller occupies the 64 KiB AXI slave
+	  window at 0x1ff00000, with CSR n at byte offset n*8, a 4 x 32 bit
+	  descriptor ring and a software bit-banged MII management channel
+	  (CSR9: bit16 = MDC level, bit17 = MDO, bit18 = MDEN,
+	  bit19 = MDI). It selects PHYLIB because the driver registers a
+	  legacy mdio bus (mdio_alloc/mdio_register_seq) for that bit-bang;
+	  no DM_MDIO/DT mdio subnode is required.
+
 config FTMAC100
 	bool "Ftmac100 Ethernet Support"
 	select MII

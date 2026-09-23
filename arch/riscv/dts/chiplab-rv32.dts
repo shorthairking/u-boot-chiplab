@@ -126,5 +126,24 @@
 			reg = <0x1fe78000 0x100>;
 			status = "disabled";
 		};
+
+		/*
+		 * DEC 21140 "Tulip" 兼容 MAC：AXI 从口 s4，addr[31:16]==0x1ff0
+		 * （chiplab/IP/AMBA/axi_mux_syn.v:859），窗口 64 KiB；
+		 * CSR n 在字节偏移 n*8（utility.v:77-134 的 CSR*_ID = n*2，
+		 * csraddr[7:2] 选 CSR，见 csr.v:458 与 csr.v:1200-1557 的读多路）。
+		 * MII 管理是 CSR9 的软件位拍（bit16=MDC 电平、bit17=MDO、
+		 * bit18=MDEN、bit19=MDI，csr.v:1044-1071/1174-1176），PHYAD=1。
+		 * mac-address 是板级固定 MAC（旧 la32r 驱动硬编码同一个值），
+		 * 新驱动从 pdata->enetaddr 下发，不再硬编码。
+		 */
+		mac0: ethernet@1ff00000 {
+			compatible = "loongson,chiplab-dmfe";
+			reg = <0x1ff00000 0x1000>;
+			mac-address = [00 98 76 64 32 19];
+			phy-mode = "mii";
+			max-speed = <100>;
+			status = "okay";
+		};
 	};
 };
